@@ -1,7 +1,7 @@
 """File backed key/value snapshots with ordered writes and recovery."""
 
 from .backup import BackupSummary
-from .filestore import FileStore
+from .filestore import Batch, FileStore
 from .keys import (
     KEY_ACID,
     KEY_EVENTS,
@@ -20,6 +20,7 @@ from .snapshot import load_float, load_json, save_json
 
 __all__ = [
     "BackupSummary",
+    "Batch",
     "FileStore",
     "KEY_ACID",
     "KEY_EVENTS",

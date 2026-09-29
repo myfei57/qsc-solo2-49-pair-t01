@@ -26,8 +26,10 @@ class SpliceOps:
             heat_input=self.heat_input(),
             at=utcnow(),
         )
-        save_json(self.store, KEY_WELD, record)
-        save_json(self.store, SEAM_PREFIX + record.seam_id, record)
+        batch = self.store.batch()
+        save_json(batch, KEY_WELD, record)
+        save_json(batch, SEAM_PREFIX + record.seam_id, record)
+        batch.commit()
         self.data.seam_id = record.seam_id
         self.machine.enter(WeldState.SPLICED)
         self.bus.publish(

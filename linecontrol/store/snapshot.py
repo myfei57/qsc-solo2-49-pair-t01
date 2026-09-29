@@ -14,7 +14,7 @@ from ..domain.records import (
     TrackSnapshot,
     WeldRecord,
 )
-from .filestore import FileStore
+from .filestore import Batch, FileStore
 
 T = TypeVar("T")
 
@@ -30,7 +30,7 @@ SNAPSHOT_TYPES = (
 )
 
 
-def save_json(store: FileStore, key: str, value: object) -> None:
+def save_json(store: FileStore | Batch, key: str, value: object) -> None:
     if not isinstance(value, SNAPSHOT_TYPES):
         raise TypeError(f"{type(value).__name__} is not a snapshot record")
     payload = json.dumps(value.to_dict(), ensure_ascii=False).encode("utf-8")
@@ -58,11 +58,11 @@ def load_float(store: FileStore, key: str) -> float:
         return 0.0
 
 
-def save_float(store: FileStore, key: str, value: float) -> None:
+def save_float(store: FileStore | Batch, key: str, value: float) -> None:
     store.save(key, json.dumps(float(value)).encode("utf-8"))
 
 
-def save_events(store: FileStore, key: str, events: list[dict]) -> None:
+def save_events(store: FileStore | Batch, key: str, events: list[dict]) -> None:
     store.save(key, json.dumps(events, ensure_ascii=False).encode("utf-8"))
 
 

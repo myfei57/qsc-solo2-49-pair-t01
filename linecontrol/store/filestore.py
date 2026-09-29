@@ -9,19 +9,35 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .backup import BackupSummary
+from .journal import (
+    JOURNAL_DIR,
+    QUARANTINE_SUFFIX,
+    discard_staging,
+    fsync_dir,
+    pending_commits,
+    read_commit,
+    write_atomic,
+    write_commit,
+)
 
 
 class FileStore:
     """Key/value files written through a temporary file plus rename.
 
-    Writes are serialised by a lock so that a snapshot is either the previous
-    complete payload or the new complete payload, never a partial file.
+    Every write is synced to stable storage before its rename, so a
+    snapshot survives a power cut as either the previous complete payload
+    or the new complete payload, never a partial file.  Writes are
+    serialised by a lock.  A group of writes that must appear together
+    goes through :meth:`batch`, whose commit is journaled so the whole
+    batch is replayed or discarded as one unit after a crash.
     """
 
     def __init__(self, directory: str | os.PathLike[str]) -> None:
         self._dir = Path(directory)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._seq = 0
+        self._recover()
 
     @property
     def directory(self) -> str:
@@ -32,22 +48,50 @@ class FileStore:
             raise ValueError(f"invalid snapshot key: {key!r}")
         return self._dir / key
 
-    def save(self, key: str, payload: bytes) -> None:
-        path = self._path(key)
-        tmp = path.with_suffix(path.suffix + ".tmp")
+    def _journal(self) -> Path:
+        return self._dir / JOURNAL_DIR
+
+    def _recover(self) -> None:
+        """Replay committed batches and drop whatever never committed."""
+
+        journal = self._journal()
+        if not journal.is_dir():
+            return
         with self._lock:
-            tmp.write_bytes(payload)
-            os.replace(tmp, path)
+            discard_staging(journal)
+            touched = False
+            for wal in pending_commits(journal):
+                entries = read_commit(wal)
+                if entries is None:
+                    quarantine = wal.with_suffix(wal.suffix + QUARANTINE_SUFFIX)
+                    os.replace(wal, quarantine)
+                else:
+                    for key, payload in entries:
+                        self._save_locked(key, payload)
+                    wal.unlink()
+                touched = True
+            if touched:
+                fsync_dir(journal)
+
+    def save(self, key: str, payload: bytes) -> None:
+        with self._lock:
+            self._save_locked(key, payload)
+
+    def _save_locked(self, key: str, payload: bytes) -> None:
+        write_atomic(self._path(key), payload)
 
     def load(self, key: str) -> bytes | None:
         path = self._path(key)
-        try:
-            return path.read_bytes()
-        except FileNotFoundError:
-            return None
+        with self._lock:
+            try:
+                return path.read_bytes()
+            except FileNotFoundError:
+                return None
 
     def exists(self, key: str) -> bool:
-        return self._path(key).exists()
+        path = self._path(key)
+        with self._lock:
+            return path.exists()
 
     def list(self, prefix: str = "") -> list[str]:
         with self._lock:
@@ -55,6 +99,21 @@ class FileStore:
         if not prefix:
             return names
         return [name for name in names if name.startswith(prefix)]
+
+    def batch(self) -> Batch:
+        """Start a group of writes committed as one all-or-nothing unit."""
+
+        return Batch(self)
+
+    def _commit_locked(self, entries: list[tuple[str, bytes]]) -> int:
+        self._seq += 1
+        journal = self._journal()
+        wal = write_commit(journal, self._seq, entries)
+        for key, payload in entries:
+            self._save_locked(key, payload)
+        wal.unlink()
+        fsync_dir(journal)
+        return self._seq
 
     def rotate(self, key: str, keep: int) -> int:
         """Trim a JSON array snapshot to its newest ``keep`` entries."""
@@ -98,3 +157,43 @@ class FileStore:
         if not target.is_dir():
             return ()
         return tuple(sorted(entry.name for entry in target.iterdir() if entry.is_file()))
+
+
+class Batch:
+    """A group of snapshot writes committed as a single durable unit.
+
+    Writes are staged in memory and only reach the disk on :meth:`commit`,
+    which journals the whole group before applying it.  After a power cut
+    the store replays the committed journal, so readers either see every
+    write of the batch or none of them.
+    """
+
+    def __init__(self, store: FileStore) -> None:
+        self._store = store
+        self._entries: list[tuple[str, bytes]] = []
+        self._closed = False
+
+    def save(self, key: str, payload: bytes) -> None:
+        """Stage a write; nothing reaches the disk before :meth:`commit`."""
+
+        if self._closed:
+            raise RuntimeError("batch is already closed")
+        self._store._path(key)  # reject an invalid key before staging
+        self._entries.append((key, bytes(payload)))
+
+    def commit(self) -> int | None:
+        """Journal and apply every staged write; returns the batch sequence."""
+
+        if self._closed:
+            raise RuntimeError("batch is already closed")
+        self._closed = True
+        if not self._entries:
+            return None
+        with self._store._lock:
+            return self._store._commit_locked(self._entries)
+
+    def discard(self) -> None:
+        """Drop every staged write without touching the disk."""
+
+        self._entries = []
+        self._closed = True
