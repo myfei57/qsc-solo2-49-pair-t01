@@ -20,9 +20,11 @@ class CommandOps:
         return self.tension.recalibrate(gain)
 
     def alarm_overcurrent(self) -> None:
-        self.weld.alarm()
+        # The latch and the raised alarm event commit together.
+        with self.transaction():
+            self.weld.alarm()
+            self.audit.raise_alarm(WELD_OVER_CURRENT)
         self.last_backup = self.store.backup()
-        self.audit.raise_alarm(WELD_OVER_CURRENT)
 
     def clear_weld_alarm(self) -> bool:
         self.weld.alarm_clear()
@@ -56,13 +58,15 @@ class CommandOps:
                 PumpErrorCode.NO_REPLENISH,
                 "concentration already at target",
             )
-        self.pump.replenish_gate(target)
-        self.pickle.apply_dose(plan.dose, volume)
+        with self.transaction():
+            self.pump.replenish_gate(target)
+            self.pickle.apply_dose(plan.dose, volume)
         return plan
 
     def resume_acid_loop(self, sample: float) -> None:
-        self.pickle.level_check(sample)
-        self.pump.resume()
+        with self.transaction():
+            self.pickle.level_check(sample)
+            self.pump.resume()
 
     def calibrate_acid(self, offset: float) -> None:
         self.pickle.calibrate(offset)

@@ -46,8 +46,17 @@ class WorkflowOps:
         The speed-up call is placed after the tension has been written to the
         store so that a restart pulls the seam at the tension it was welded
         with rather than at whatever the previous seam used.
+
+        Every snapshot the action touches (tension, weld record, seam record,
+        track and audit events) is committed as one batch, so a power cut
+        cannot leave the weld record without its track or a half-written
+        seam.
         """
 
+        with self.transaction():
+            self._weld_and_speedup()
+
+    def _weld_and_speedup(self) -> None:
         self.seq.begin_if_idle("weld-and-speedup")
         self.set_phase(Phase.ALIGNING)
         try:
@@ -77,9 +86,13 @@ class WorkflowOps:
 
         The refresh has to land before the arc gate re-reads the confirmation,
         and the track has to move onto the new seam before the exit shear is
-        allowed to cut.
+        allowed to cut.  The seam record and the track move commit together.
         """
 
+        with self.transaction():
+            self._splice_and_refresh(position)
+
+    def _splice_and_refresh(self, position: float) -> None:
         try:
             self.entry.align_refresh(position)
             self.weld.set_line_speed(self.strip.speed())
@@ -91,8 +104,15 @@ class WorkflowOps:
             raise
 
     def start_acid_loop(self, sample: float) -> None:
-        """Confirm the level, start the pump and open the rinse valve."""
+        """Confirm the level, start the pump and open the rinse valve.
 
+        The pump state, run hours and rinse flag commit as one batch.
+        """
+
+        with self.transaction():
+            self._start_acid_loop(sample)
+
+    def _start_acid_loop(self, sample: float) -> None:
         try:
             self.pickle.level_check(sample)
             self.seq.record("level-check")
@@ -136,8 +156,15 @@ class WorkflowOps:
         self.set_phase(Phase.COIL_DONE)
 
     def stop_line(self) -> None:
-        """Stop the strip, flush the tail, then stop the pump."""
+        """Stop the strip, flush the tail, then stop the pump.
 
+        The pump run hours, pump state and rinse flag commit as one batch.
+        """
+
+        with self.transaction():
+            self._stop_line()
+
+    def _stop_line(self) -> None:
         self.set_phase(Phase.STOPPING)
         try:
             self.strip.stop()
@@ -159,8 +186,18 @@ class WorkflowOps:
         self.bus.publish(Event(kind=EventKind.STOP, source="line", message="stopped"))
 
     def production_cycle(self, payload: CycleInput) -> None:
-        """Run load, weld, acid loop, dry and stop as one sequence."""
+        """Run load, weld, acid loop, dry and stop as one sequence.
 
+        Each multi-key stage is its own durable batch (see
+        :meth:`weld_and_speedup`, :meth:`start_acid_loop` ...): a power cut
+        mid-cycle replays the last fully completed stage and discards the
+        interrupted one, rather than rolling a long physical cycle back to
+        its very beginning.
+        """
+
+        self._production_cycle(payload)
+
+    def _production_cycle(self, payload: CycleInput) -> None:
         self.seq.begin("production")
         self.load_coil(payload.coil_id, payload.target)
         self.seq.record("stage:load-coil")

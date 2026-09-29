@@ -36,5 +36,8 @@ class LogOps:
 
     def _flush(self) -> int:
         payload = [event.to_dict() for event in self.state.events]
-        save_events(self.store, KEY_EVENTS, payload)
-        return self.store.rotate(KEY_EVENTS, MAX_EVENTS)
+        # Save and trim as one batch: a crash can never expose a window that
+        # was written but not yet rotated.
+        with self._store:
+            save_events(self._store, KEY_EVENTS, payload)
+            return self._store.rotate(KEY_EVENTS, MAX_EVENTS)

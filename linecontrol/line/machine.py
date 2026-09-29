@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..audit.logger import Logger
@@ -53,3 +55,16 @@ class Line(WorkflowOps, CommandOps, RecoveryOps, ViewOps):
 
     def set_phase(self, phase: Phase) -> None:
         self.phase = phase
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Batch every snapshot write inside one business action.
+
+        All key files written while the block is open land in a single
+        committed batch: on restart they are either all present (the batch
+        finished) or all absent (the action was interrupted).  Raising inside
+        the block discards the staged writes.
+        """
+
+        with self.store:
+            yield
